@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#101827">
+<title>Live Mic Amplifier</title>
+<style>
+  :root { color-scheme: dark; --bg:#101827; --panel:#1b2940; --accent:#39d6a3; --muted:#aab8cc; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; padding:24px 16px; display:grid; place-items:center;
+         background:linear-gradient(160deg,#101827,#172a3d); color:#f4f7fb;
+         font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { width:min(100%,480px); background:var(--panel); border:1px solid #34445c;
+         border-radius:26px; padding:25px; box-shadow:0 18px 55px #0006; }
+  h1 { margin:0 0 6px; font-size:27px; }
+  .sub { color:var(--muted); margin:0 0 24px; line-height:1.45; }
+  .status { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:14px; margin-bottom:20px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#77859a; }
+  .dot.on { background:var(--accent); box-shadow:0 0 12px #39d6a3aa; }
+  button { width:100%; border:0; border-radius:15px; padding:16px; font-size:17px; font-weight:750; cursor:pointer; }
+  #start { background:var(--accent); color:#06251c; }
+  #stop { background:#34445c; color:#fff; margin-top:10px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .control { margin:26px 0; }
+  .labelrow { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+  label { font-weight:650; }
+  output { color:var(--accent); font-variant-numeric:tabular-nums; font-weight:750; }
+  input[type=range] { width:100%; accent-color:var(--accent); min-height:32px; }
+  .meter { height:12px; background:#0e1725; border-radius:20px; overflow:hidden; margin-top:9px; }
+  #meterbar { height:100%; width:0%; background:linear-gradient(90deg,#39d6a3,#f5c451,#ff6868); transition:width .08s; }
+  .hint { background:#122036; color:#c6d3e4; padding:14px; border-radius:14px; font-size:13px; line-height:1.5; margin-top:20px; }
+  .error { color:#ff9b9b; white-space:pre-wrap; font-size:14px; margin-top:14px; }
+  .small { color:var(--muted); font-size:12px; text-align:center; margin-top:16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎤 Live Mic Amplifier</h1>
+  <p class="sub">Hear your microphone in your headphones in real time.</p>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="status">Microphone is off</span></div>
+  <button id="start">Start microphone</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div class="control">
+    <div class="labelrow"><label for="gain">Microphone volume</label><output id="gainval">2.0×</output></div>
+    <input id="gain" type="range" min="0" max="8" step="0.1" value="2">
+  </div>
+
+  <div class="control">
+    <div class="labelrow"><label for="monitor">Monitor level</label><output id="monval">100%</output></div>
+    <input id="monitor" type="range" min="0" max="1" step="0.01" value="1">
+  </div>
+
+  <div class="control">
+    <div class="labelrow"><label>Microphone input</label><output id="level">—</output></div>
+    <div class="meter"><div id="meterbar"></div></div>
+  </div>
+
+  <div class="hint">
+    <strong>Android tips</strong><br>
+    • Connect headphones before you press Start.<br>
+    • Allow microphone permission when prompted.<br>
+    • If it is quiet, raise Microphone volume gradually.<br>
+    • Use wired headphones for the lowest delay. Bluetooth can have noticeable lag.
+  </div>
+  <div class="error" id="error" role="alert"></div>
+  <div class="small">Audio is processed in this browser and is not uploaded.</div>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let stream = null, ctx = null, source = null, gainNode = null, analyser = null, raf = 0;
+  const gain = $('gain'), monitor = $('monitor');
+
+  function updateControls() {
+    $('gainval').textContent = Number(gain.value).toFixed(1) + '×';
+    $('monval').textContent = Math.round(Number(monitor.value) * 100) + '%';
+    if (gainNode) gainNode.gain.setTargetAtTime(Number(gain.value), ctx.currentTime, 0.025);
+    if (gainNode) gainNode.gain.setTargetAtTime(Number(gain.value) * Number(monitor.value), ctx.currentTime, 0.025);
+  }
+  gain.addEventListener('input', updateControls);
+  monitor.addEventListener('input', updateControls);
+
+  async function stop() {
+    cancelAnimationFrame(raf);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ctx && ctx.state !== 'closed') await ctx.close();
+    stream = ctx = source = gainNode = analyser = null;
+    $('dot').classList.remove('on');
+    $('status').textContent = 'Microphone is off';
+    $('start').disabled = false;
+    $('stop').disabled = true;
+    $('meterbar').style.width = '0%';
+    $('level').textContent = '—';
+  }
+
+  function meter() {
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (const x of data) { const v = (x - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / data.length);
+    const pct = Math.min(100, Math.round(rms * 280));
+    $('meterbar').style.width = pct + '%';
+    $('level').textContent = pct + '%';
+    raf = requestAnimationFrame(meter);
+  }
+
+  $('start').addEventListener('click', async () => {
+    $('error').textContent = '';
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      $('error').textContent = 'Microphone access is unavailable. Open this page in Chrome over HTTPS (or localhost).';
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        video: false
+      });
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      ctx = new AudioContextClass();
+      await ctx.resume();
+      source = ctx.createMediaStreamSource(stream);
+      gainNode = ctx.createGain();
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      gainNode.gain.value = Number(gain.value) * Number(monitor.value);
+      source.connect(analyser);
+      source.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      $('dot').classList.add('on');
+      $('status').textContent = 'Microphone is live';
+      $('start').disabled = true;
+      $('stop').disabled = false;
+      meter();
+    } catch (e) {
+      await stop();
+      $('error').textContent = e.name === 'NotAllowedError'
+        ? 'Microphone permission was denied. Allow microphone access in Chrome site settings and try again.'
+        : 'Could not start the microphone: ' + (e.message || e.name);
+    }
+  });
+  $('stop').addEventListener('click', stop);
+  window.addEventListener('pagehide', stop);
+})();
+</script>
+</body>
+</html>
